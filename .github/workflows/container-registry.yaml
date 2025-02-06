@@ -24,6 +24,6 @@ jobs:
       
      - name: Build and push
        uses: docker/build-push-action@v5
-      with: 
+       with: 
         push: true
         tags: ${{ secrets.ACR_ENDPOINT }}/shiny-azure-app-service:latest
