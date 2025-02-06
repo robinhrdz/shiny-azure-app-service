@@ -22,8 +22,8 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
       
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with: 
-          push: true
-          tags: ${{secrets.ACR_ENDPOINT}}/${{ env.IMAGE_NAME}}
+     - name: Build and push
+       uses: docker/build-push-action@v5
+      with: 
+        push: true
+        tags: ${{ secrets.ACR_ENDPOINT }}/shiny-azure-app-service:latest
