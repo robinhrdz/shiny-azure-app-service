@@ -1,27 +1,22 @@
 FROM rocker/r-ver:4.2.0
 
-# Install system dependencies for odbc
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    unixodbc \
-    unixodbc-dev \
-    libodbc1 \
+    libcurl4-openssl-dev \
+    libssl-dev \
+    libxml2-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory and copy files
-WORKDIR /app
-COPY . /app
+# Set CRAN repository
+RUN R -e "options(repos = c(CRAN = 'https://packagemanager.posit.co/cran/latest'))"
 
-# Install renv before restoring packages
-RUN R -e "install.packages('renv')"
+# Install only required packages
+RUN R -e "install.packages(c('shiny', 'shinydashboard', 'AzureStor'), dependencies=TRUE)"
 
-# Restore packages from renv.lock (if it exists)
-RUN R -e "options(renv.config.repos.override = 'https://packagemanager.posit.co/cran/latest'); renv::restore()"
+# Create app directory and copy app
+RUN mkdir /app
+COPY app.R /app/
 
-# Ensure required packages are installed
-RUN R -e "install.packages(c('shiny', 'shinydashboard', 'odbc', 'DBI', 'dplyr', 'ggplot2', 'plotly', 'tidyr', 'lubridate', 'DT'))"
-
-# Expose port 3838 for Shiny apps
 EXPOSE 3838
 
-# Run the Shiny app
 CMD ["R", "-e", "shiny::runApp('/app/app.R', host='0.0.0.0', port=3838)"]
