@@ -1,107 +1,99 @@
 library(shiny)
 library(shinydashboard)
+library(httr)
+library(jsonlite)
 library(dplyr)
 library(stringr)
 library(lubridate)
 library(ggplot2)
 library(plotly)
 library(DT)
-library(readr)
-library(httr)
-library(jsonlite)
+library(shinyjs)
+library(AzureCosmosR)
 
-# Custom CSS
-customCSS <- HTML("
-  .skin-blue .main-header .logo { background-color: #455642 !important; }
-  .skin-blue .main-header .navbar { background-color: #455642 !important; }
-  .skin-blue .main-header .navbar .sidebar-toggle:hover { background-color: #3a4837 !important; }
-  .skin-blue .left-side, .skin-blue .main-sidebar, .skin-blue .wrapper { background-color: #2f3b2c !important; }
-  .content-wrapper { background-color: #f4f6f4 !important; }
-  .box { border-top-color: #455642 !important; }
-")
 
-# Function to read and process forms separately
-read_all_forms <- function(base_path) {
-  form1_data <- list()
-  form2_data <- list()
-  form3_data <- list()
-  
-  # List all church directories
-  church_dirs <- list.dirs(base_path, full.names = TRUE, recursive = FALSE)
-  
-  for (church_dir in church_dirs) {
-    church_id <- basename(church_dir)
-    user_dirs <- list.dirs(church_dir, full.names = TRUE, recursive = FALSE)
-    
-    for (user_dir in user_dirs) {
-      user_id <- basename(user_dir)
-      csv_files <- list.files(user_dir, pattern = "\\.csv$", full.names = TRUE)
-      
-      for (csv_file in csv_files) {
-        tryCatch({
-          form_data <- read_csv(csv_file, show_col_types = FALSE)
-          form_data$church_id <- church_id
-          form_data$user_id <- user_id
-          
-          # Determine form type and store in appropriate lis
-          if ("Most helpful resources" %in% names(form_data)) {
-            form1_data[[length(form1_data) + 1]] <- form_data
-          } else if ("Spouse is emotionally supportive (1-5)" %in% names(form_data)) {
-            form2_data[[length(form2_data) + 1]] <- form_data
-          } else if ("Attended marriage retreats" %in% names(form_data)) {
-            form3_data[[length(form3_data) + 1]] <- form_data
-          }
-          
-        }, error = function(e) {
-          warning(paste("Error reading file:", csv_file))
-        })
-      }
-    }
-  }
-  
-  # Combine each form type separately
-  forms <- list(
-    form1 = if (length(form1_data) > 0) bind_rows(form1_data) else NULL,
-    form2 = if (length(form2_data) > 0) bind_rows(form2_data) else NULL,
-    form3 = if (length(form3_data) > 0) bind_rows(form3_data) else NULL
-  )
-  
-  return(forms)
-}
 
-# UI Definition
+# Cosmos DB Connection Details
+cosmos_endpoint <- "https://smlp-cosmos.documents.azure.com:443/"
+cosmos_key <- "cnIOBAncXO4j4aAxs9hdL8tCsyJHpKQcNuFIBnnrFWQGT7L6H0RthRfwijFEO0GSpl39pLE1lQ2pACDbA90tsw=="
+cosmos_database <- "smlp"
+cosmos_container_name <- "form-templates"
+
+# UI
 ui <- dashboardPage(
   skin = "blue",
-  dashboardHeader(title = "Sacred Marriage Life Program"),
-  dashboardSidebar(
-    uiOutput("dynamic_menu")
-  ),
+  dashboardHeader(title = "Sacred Marriage Life Program", titleWidth = 280),
+  dashboardSidebar(disable = TRUE),
   dashboardBody(
+    useShinyjs(),
     tags$head(
-      tags$style(customCSS),
+      tags$link(rel = "stylesheet", type = "text/css", href = "custom.css"),
       tags$link(rel = "stylesheet", href = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css")
     ),
+    
+    # First row with user information - shown to ALL users
     fluidRow(
-      column(
-        width = 12,
-        box(
-          width = NULL, title = "Current User Information",
-          uiOutput("user_display")
-        )
+      column(width = 12,
+             box(
+               width = NULL, title = "Current User Information", 
+               solidHeader = TRUE, status = "primary",
+               uiOutput("user_display")
+             )
       )
     ),
-    uiOutput("role_based_content")
+    
+    # Welcome message based on role
+    uiOutput("role_welcome_message"),
+    
+    # Admin-only content - all wrapped in a conditional panel
+    uiOutput("admin_dashboard")
   )
 )
 
-# Server Definition
+# Define Server
 server <- function(input, output, session) {
-  # Get user data from API
+  # Cosmos
+  template_count <- reactiveVal(0)
+  templates_in_use <- reactiveVal(0)
+  templates_not_in_use <- reactiveVal(0)
+  
+  # Function to get count using REST API directly
+  getContainerResourceInfo <- function() {
+    tryCatch({
+      cosmos <- cosmos_endpoint(cosmos_endpoint, cosmos_key)
+      db <- get_cosmos_database(cosmos, cosmos_database)
+      container <- get_cosmos_container(db, cosmos_container_name)
+      
+      query_result <- query_documents(container, query = "SELECT * FROM c")
+      
+      doc_count <- ifelse(is.null(query_result) || nrow(query_result) == 0, 0, nrow(query_result))
+      
+      in_use_count <- sum(query_result$in_use, na.rm = TRUE)
+      not_in_use_count <- doc_count - in_use_count
+      
+      template_count(doc_count)
+      templates_in_use(in_use_count)
+      templates_not_in_use(not_in_use_count)
+    }, error = function(e) {
+      message(paste("Error getting container info:", e$message))
+    })
+  }
+  
+  # Initial connection
+  observe({
+    tryCatch({
+      getContainerResourceInfo()
+    }, error = function(e) {
+      message(paste("Error connecting to Cosmos DB:", e$message))
+    })
+  })
+  
+  # Fetch user data
   user_data <- reactiveVal(NULL)
   
   observe({
     response <- tryCatch({
-      GET("https://localhost:7271/api/User/get-user", 
+      GET("https://smlp-aabqhwdjcbfee2fx.centralus-01.azurewebsites.net/api/User/get-user", 
           config = list(ssl_verifypeer = FALSE))
     }, error = function(e) {
       return(NULL)
@@ -111,327 +103,472 @@ server <- function(input, output, session) {
       user_data(fromJSON(rawToChar(response$content)))
     }
   })
+  # Church Data
+  church_data <- reactiveVal(NULL)
   
-  # Read form data
-  forms_data <- reactive({
-    read_all_forms("C:/Users/robin/OneDrive/Desktop/SMLPD/church_form_responses")
+ # fetching church data
+  observe({
+    user <- user_data()
+    
+    # Only proceed if we have valid user data with a churchId
+    if (!is.null(user) && !is.null(user$churchId)) {
+      response <- tryCatch({
+        GET("https://localhost:7006/api/church", 
+            config = list(ssl_verifypeer = FALSE))
+      }, error = function(e) {
+        return(NULL)
+      })
+      
+      if (!is.null(response) && status_code(response) == 200) {
+        all_churches <- fromJSON(rawToChar(response$content))
+        
+        # Filter to get only the church matching the user's churchId
+        user_church <- all_churches[all_churches$id == user$churchId, ]
+        
+        # Set the reactive value to the filtered church data
+        if (nrow(user_church) > 0) {
+          church_data(user_church)
+        } else {
+          # If no matching church was found
+          church_data(NULL)
+        }
+      }
+    }
   })
-  
-  # User display
+  # Display user info, this is shown to ALL users
   output$user_display <- renderUI({
     user <- user_data()
-    if (is.null(user)) return(NULL)
+    
+    if (is.null(user)) {
+      return(div(class = "alert alert-warning", style = "padding: 10px;",
+                 icon("exclamation-triangle"), 
+                 "No user logged in"))
+    }
     
     role_text <- switch(
       as.character(user$role),
       "1" = "Administrator",
       "2" = "Pastor",
       "3" = "User",
-      "Unknown Role"
+      "Unknown"
     )
     
+    # Enhanced user display with more details
     div(
-      h3(paste("Welcome", user$name)),
-      tags$ul(
-        class = "list-group",
-        tags$li(class = "list-group-item", tags$strong("Role: "), role_text),
-        tags$li(class = "list-group-item", tags$strong("User ID: "), user$userId),
-        tags$li(class = "list-group-item", tags$strong("Church ID: "), user$churchId)
-      )
-    )
-  })
-  
-  # Dynamic menu based on user role
-  output$dynamic_menu <- renderMenu({
-    user <- user_data()
-    if (is.null(user)) return(NULL)
-    
-    if (user$role == "1") {  # Admin
-      sidebarMenu(
-        menuItem("Overview", tabName = "overview", icon = icon("chart-line"))
-      )
-    } else if (user$role == "2") {  # Pastor
-      sidebarMenu(
-        menuItem("Overview", tabName = "overview", icon = icon("chart-line"))
-      )
-    }
-  })
-  
-  # Role-based content
-  output$role_based_content <- renderUI({
-    user <- user_data()
-    if (is.null(user)) return(NULL)
-    
-    if (user$role == "1") {  # Admin View
-      tabItems(
-        # Demographics Tab
-        tabItem(tabName = "overview",
-                fluidRow(
-                  box(title = "Age Distribution", width = 6,
-                      plotlyOutput("age_distribution")),
-                  box(title = "Income Distribution", width = 6,
-                      plotlyOutput("income_distribution"))
-                ),
-                fluidRow(
-                  box(title = "Participants by Church", width = 12,
-                      plotlyOutput("church_distribution"))
-                ), 
-        
-        
-        # Relationship Health Tab
-                fluidRow(
-                  box(title = "Overall Satisfaction Metrics", width = 12,
-                      plotlyOutput("satisfaction_metrics")),
-                  box(title = "Communication and Support", width = 6,
-                      plotlyOutput("communication_metrics")),
-                  box(title = "Issue Resolution", width = 6,
-                      plotlyOutput("issue_resolution"))
-                ), 
-      
-        
-        # Church Impact Tab
-       
-                fluidRow(
-                  box(title = "Church Safety Perception", width = 6,
-                      plotlyOutput("safety_perception")),
-                  box(title = "Marital Care Effectiveness", width = 6,
-                      plotlyOutput("care_effectiveness"))
-                ),
-                fluidRow(
-                  box(title = "Church Comparison", width = 12,
-                      DTOutput("church_comparison"))
-                ),
-        
-        # Resources Tab
-                fluidRow(
-                  box(title = "Most Helpful Resources", width = 12,
-                      plotlyOutput("helpful_resources")),
-                  box(title = "Resource Utilization", width = 6,
-                      plotlyOutput("resource_usage")),
-                  box(title = "Resource Impact", width = 6,
-                      plotlyOutput("resource_impact"))
-                )
+      div(style = "text-align: center;",
+          h3(style = "margin: 5px 0; color: #455642;", icon("user-circle"), user$name),
+          div(style = "display: inline-block; background-color: #455642; color: white; padding: 3px 10px; border-radius: 12px; font-size: 12px;", 
+              role_text),
+          hr(style = "margin: 10px 0;"),
+          div(style = "display: flex; justify-content: space-between; margin-top: 10px;",
+              div(style = "text-align: center; width: 33%;",
+                  p(style = "margin: 0; font-size: 12px; color: #666;", "USER ID"),
+                  p(style = "margin: 0; font-weight: bold;", user$userId)
+              ),
+              div(style = "text-align: center; width: 33%;",
+                  p(style = "margin: 0; font-size: 12px; color: #666;", "CHURCH ID"),
+                  p(style = "margin: 0; font-weight: bold;", user$churchId)
+              ),
 
+          )
       )
     )
-    } else if (user$role == "2") {  # Pastor View
-      tabItems(
-        # Overview Tab
-        tabItem(tabName = "overview",
-                fluidRow(
-                  valueBoxOutput("total_members", width = 4),
-                  valueBoxOutput("avg_satisfaction", width = 4),
-                  valueBoxOutput("needs_attention", width = 4)
-                ),
-                fluidRow(
-                  box(title = "Satisfaction Trends", width = 12,
-                      plotlyOutput("church_satisfaction_trend"))
-                )
+  })
+  
+
+  # Welcome message based on role
+  output$role_welcome_message <- renderUI({
+    user <- user_data()
+    
+    if (is.null(user)) {
+      return(NULL)
+    }
+    
+    role_text <- switch(
+      as.character(user$role),
+      "1" = "Administrator",
+      "2" = "Pastor",
+      "3" = "User",
+      "Unknown"
+    )
+    
+    div(class = "role-welcome",
+        p(paste0("Welcome, ", user$name, "! You are logged in as a ", role_text, ".")),
+
+    )
+  })
+  
+  # Dashboards
+  output$admin_dashboard <- renderUI({
+    user <- user_data()
+    
+    if (user$role == "1") {
+      #admin Dashboard
+      return(tagList(
+        fluidRow(
+          column(width = 4, valueBoxOutput("templates_count_box", width = NULL)),
+          column(width = 4, valueBoxOutput("templates_in_use_box", width = NULL)),
+          column(width = 4, valueBoxOutput("templates_not_in_use_box", width = NULL))
         ),
-        
-        # Member Support Tab
-        tabItem(tabName = "support",
-                fluidRow(
-                  box(title = "Priority Support Cases", width = 12,
-                      DTOutput("priority_cases")),
-                  box(title = "Support Needs Distribution", width = 6,
-                      plotlyOutput("support_distribution")),
-                  box(title = "Issue Categories", width = 6,
-                      plotlyOutput("issue_categories"))
-                )
+        fluidRow(
+          column(width = 3, box(
+            title = "Total Submissions", width = NULL, height = "150px",
+            solidHeader = TRUE, status = "primary",
+            div(class = "text-center", uiOutput("total_submissions_big"))
+          )),
+          column(width = 3, box(
+            title = "Unique Users", width = NULL, height = "150px",
+            solidHeader = TRUE, status = "primary",
+            div(class = "text-center", uiOutput("unique_users_big"))
+          )),
+          column(width = 6, box(
+            title = "Top Active Users", width = NULL, height = "150px",
+            solidHeader = TRUE, status = "primary",
+            tableOutput("top_users")
+          ))
         ),
-        
-        # Pastor Resources Tab
-        tabItem(tabName = "pastor_resources",
-                fluidRow(
-                  box(title = "Resource Effectiveness", width = 12,
-                      plotlyOutput("pastor_resource_effectiveness")),
-                  box(title = "Recommended Resources", width = 12,
-                      DTOutput("recommended_resources"))
-                )
+        fluidRow(
+          column(width = 6, div(style = "height: 380px;",
+                                box(title = "Submissions per Church", width = NULL, height = "100%",
+                                    solidHeader = TRUE, status = "primary",
+                                    plotlyOutput("submissions_per_church", height = "300px"))
+          )),
+          column(width = 6, div(style = "height: 300px;",
+                                box(title = "Submissions Over Time", width = NULL, height = "100%",
+                                    solidHeader = TRUE, status = "primary",
+                                    plotlyOutput("submissions_over_time", height = "300px"))
+          ))
+        ),
+        fluidRow(
+          column(width = 6, box(
+            title = "Marital Status Distribution", width = NULL, height = "250px",
+            solidHeader = TRUE, status = "primary",
+            plotlyOutput("marital_status_chart", height = "190px"))
+          )
+        )
+      ))
+    } 
+    # Pastor Dashboard
+    # In the pastor dashboard section, modify the return statement to include church info:
+    else if (user$role == "2") {
+      return(
+        fluidRow(
+          column(width = 6, box(
+            title = "Church Information", width = NULL,
+            solidHeader = TRUE, status = "primary",
+            
+            fluidRow(
+              column(4, strong("Church Name:")),
+              column(8, textOutput("church_name"))
+            ),
+            fluidRow(
+              column(4, strong("Address:")),
+              column(8, textOutput("church_address"))
+            ),
+          )),
+          column(width = 3, box(
+            title = "Total Church Members", width = NULL, height = "150px",
+            solidHeader = TRUE, status = "primary",
+            div(class = "text-center", uiOutput("unique_users_big"))
+          )),
+          column(width = 3, box(
+            title = "Top Active Church Members", width = NULL, height = "150px",
+            solidHeader = TRUE, status = "primary",
+            tableOutput("top_users")
+          ))
         )
       )
     }
+    # User Dashboard
+    else if (user$role == "3") {
+      return(
+        fluidRow(
+          column(width = 6, box(
+            title = "Church Information", width = NULL, height = "150px",
+            solidHeader = TRUE, status = "primary",
+            
+            fluidRow(
+              column(4, strong("Church Name:")),
+              column(8, textOutput("church_name"))
+            ),
+            fluidRow(
+              column(4, strong("Address:")),
+              column(8, textOutput("church_address"))
+            ),
+          ))
+        )
+      )
+    }
+    
+ else {
+      return(NULL)  # If user role is unknown, return nothing
+    }
   })
   
-  # Admin Analytics Outputs
-  output$age_distribution <- renderPlotly({
-    data <- forms_data()$form1
-    if (is.null(data)) return(NULL)
-    
-    plot_ly(data, x = ~Age, type = "histogram",
-            marker = list(color = "#455642")) %>%
-      layout(title = "Age Distribution",
-             xaxis = list(title = "Age"),
-             yaxis = list(title = "Count"))
+  
+  
+  # Value boxes - Admin only
+  output$templates_count_box <- renderValueBox({
+    valueBox(
+      template_count(),
+      "Form Templates",
+      icon = icon("file-alt"),
+      color = "blue",
+      width = NULL
+    )
   })
   
-  output$income_distribution <- renderPlotly({
-    data <- forms_data()$form1
-    if (is.null(data)) return(NULL)
-    
-    # Create income distribution plot using Salary column
-    plot_ly(data, x = ~Salary, type = "histogram",
-            marker = list(color = "#455642"),
-            nbinsx = 10) %>%
-      layout(title = "Salary Distribution",
-             xaxis = list(title = "Monthly Salary"),
-             yaxis = list(title = "Count"),
-             bargap = 0.1) %>%
-      config(displayModeBar = FALSE)
-  })
-  output$satisfaction_metrics <- renderPlotly({
-    data <- forms_data()$form1
-    if (is.null(data)) return(NULL)
-    
-    plot_ly(data, x = ~Age, y = ~`General satisfaction (1-5)`,
-            type = "scatter", mode = "markers",
-            marker = list(color = "#455642", size = 10)) %>%
-      layout(title = "Satisfaction by Age",
-             xaxis = list(title = "Age"),
-             yaxis = list(title = "Satisfaction Level"))
-  })
-  # Participants by Church Distribution
-  output$church_distribution <- renderPlotly({
-    data <- forms_data()$form1
-    if (is.null(data)) return(NULL)
-    
-    # Count participants per church
-    church_counts <- data %>%
-      group_by(church_id) %>%
-      summarise(count = n()) %>%
-      mutate(church_id = paste("Church", church_id))
-    
-    plot_ly(church_counts, x = ~church_id, y = ~count, type = "bar",
-            marker = list(color = "#455642")) %>%
-      layout(title = "Participants by Church",
-             xaxis = list(title = "Church"),
-             yaxis = list(title = "Number of Participants"))
+  output$templates_in_use_box <- renderValueBox({
+    valueBox(
+      templates_in_use(),
+      "In Use",
+      icon = icon("check-circle"),
+      color = "green",
+      width = NULL
+    )
   })
   
-  # Communication and Support
-  output$communication_metrics <- renderPlotly({
-    data <- forms_data()$form2  # Assuming these metrics are in form2
-    if (is.null(data)) return(NULL)
-    
-    plot_ly(data) %>%
-      add_trace(y = ~`Communication satisfaction (1-7)`, name = "Communication",
-                type = "box", boxpoints = "all", jitter = 0.3,
-                marker = list(color = "#455642")) %>%
-      add_trace(y = ~`Spouse is emotionally supportive (1-5)`, name = "Support",
-                type = "box", boxpoints = "all", jitter = 0.3,
-                marker = list(color = "#698964")) %>%
-      layout(title = "Communication and Support Metrics",
-             yaxis = list(title = "Rating"))
+  output$templates_not_in_use_box <- renderValueBox({
+    valueBox(
+      templates_not_in_use(),
+      "Not In Use",
+      icon = icon("times-circle"),
+      color = "red",
+      width = NULL
+    )
   })
   
-  # Issue Resolution
-  output$issue_resolution <- renderPlotly({
-    data <- forms_data()$form2
-    if (is.null(data)) return(NULL)
-    
-    plot_ly(data, x = ~`Conflict resolution effectiveness (1-7)`, type = "histogram",
-            marker = list(color = "#455642")) %>%
-      layout(title = "Conflict Resolution Effectiveness",
-             xaxis = list(title = "Rating (1-7)"),
-             yaxis = list(title = "Count"))
+  # Fetch form data from blob and parse contents
+  fetch_form_data <- reactive({
+    tryCatch({
+      # First get the blob metadata
+      blob_response <- GET("https://smlp-aabqhwdjcbfee2fx.centralus-01.azurewebsites.net/api/ConnectionTest/get-data-from-blob",
+                           config = list(ssl_verifypeer = FALSE))
+      
+      if (status_code(blob_response) != 200) {
+        warning(paste("Blob metadata API returned status code:", status_code(blob_response)))
+        return(NULL)
+      }
+      
+      blob_data <- fromJSON(content(blob_response, "text"))$data
+      if (is.null(blob_data)) {
+        warning("Blob API returned empty data")
+        return(NULL)
+      }
+      
+      # Extract blob names to then fetch actual form content
+      processed_data <- data.frame()
+      
+      # For each blob, try to fetch the actual form content 
+      # This would be replaced with actual API call to get form content
+      for (i in 1:nrow(blob_data)) {
+        blob_name <- blob_data$blobName[i]
+        
+        # Extract form details from the blob name
+        church_id <- str_extract(blob_name, "church[0-9]+") 
+        user_id <- str_extract(blob_name, "user[0-9]+")
+        timestamp <- str_extract(blob_name, "\\d{14}") %>% ymd_hms()
+        
+        form_response <- GET(paste0("https://smlp-aabqhwdjcbfee2fx.centralus-01.azurewebsites.net/api/Form/get-form-data?blobName=", blob_name),
+                             config = list(ssl_verifypeer = FALSE))
+        
+        if (status_code(form_response) == 200) {
+          form_data <- fromJSON(content(form_response, "text"))
+          
+         
+          row_data <- data.frame(
+            blobName = blob_name,
+            church = church_id,
+            user = user_id,
+            timestamp = timestamp,
+            form_id = form_data$form_id,
+            marital_status = form_data$`marital status`,
+            stringsAsFactors = FALSE
+          )
+          
+          processed_data <- rbind(processed_data, row_data)
+        }
+      }
+      
+      
+      return(processed_data)
+    }, error = function(e) {
+      warning(paste("Error in form data processing:", e$message))
+      
+      
+    })
   })
   
-  # Church Safety Perception
-  output$safety_perception <- renderPlotly({
-    data <- forms_data()$form3
-    if (is.null(data)) return(NULL)
-    
-    plot_ly(data, x = ~`Church is a safe place (1-7)`, type = "histogram",
-            marker = list(color = "#455642")) %>%
-      layout(title = "Church Safety Perception",
-             xaxis = list(title = "Rating (1-7)"),
-             yaxis = list(title = "Count"))
+  # Fetch blob data for original metrics
+  fetch_blob_data <- reactive({
+    tryCatch({
+      response <- GET("https://smlp-aabqhwdjcbfee2fx.centralus-01.azurewebsites.net/api/ConnectionTest/get-data-from-blob",
+                      config = list(ssl_verifypeer = FALSE))
+      if (status_code(response) == 200) {
+        data <- fromJSON(content(response, "text"))$data
+        if (is.null(data)) {
+          warning("API returned empty data")
+          return(NULL)
+        }
+        return(data)
+      } else {
+        warning(paste("API returned status code:", status_code(response)))
+        return(NULL)
+      }
+    }, error = function(e) {
+      warning(paste("Error in API call:", e$message))
+      return(NULL)
+    })
   })
   
-  # Marital Care Effectiveness
-  output$care_effectiveness <- renderPlotly({
-    data <- forms_data()$form3
-    if (is.null(data)) return(NULL)
-    
-    plot_ly(data, x = ~`Marital care was helpful (1-7)`, type = "histogram",
-            marker = list(color = "#455642")) %>%
-      layout(title = "Marital Care Effectiveness",
-             xaxis = list(title = "Rating (1-7)"),
-             yaxis = list(title = "Count"))
+  # Total Submissions - Big Number Format
+  output$total_submissions_big <- renderUI({
+    data <- fetch_blob_data()
+    if (!is.null(data)) {
+      total_count <- nrow(data)
+      tagList(
+        div(class = "big-metric", total_count),
+        div(class = "metric-label", "Total Submissions")
+      )
+    } else {
+      div(class = "alert alert-danger", "Error fetching data")
+    }
   })
   
-  # Church Comparison
-  output$church_comparison <- renderDT({
-    data <- forms_data()$form3
-    if (is.null(data)) return(NULL)
-    
-    comparison_data <- data %>%
-      group_by(church_id) %>%
-      summarise(
-        `Avg Safety Rating` = mean(`Church is a safe place (1-7)`, na.rm = TRUE),
-        `Avg Care Effectiveness` = mean(`Marital care was helpful (1-7)`, na.rm = TRUE),
-        `Marriage Counseling Available` = sum(`Church provides marriage counseling (Yes/No)` == "Yes") / n() * 100
-      ) %>%
-      mutate(across(where(is.numeric), round, 2))
-    
-    datatable(comparison_data,
-              options = list(pageLength = 10),
-              rownames = FALSE)
+  # Unique Users - Big Number Format
+  output$unique_users_big <- renderUI({
+    data <- fetch_blob_data()
+    if (!is.null(data)) {
+      unique_users <- n_distinct(str_extract(data$blobName, "user[0-9]+"))
+      tagList(
+        div(class = "big-metric", unique_users),
+        div(class = "metric-label", "Unique Users")
+      )
+    } else {
+      div(class = "alert alert-danger", "Error fetching data")
+    }
   })
   
-  # Most Helpful Resources
-  output$helpful_resources <- renderPlotly({
-    data <- forms_data()$form1
-    if (is.null(data)) return(NULL)
-    
-    resource_counts <- data %>%
-      group_by(`Most helpful resources`) %>%
-      summarise(count = n()) %>%
-      arrange(desc(count))
-    
-    plot_ly(resource_counts, x = ~`Most helpful resources`, y = ~count, type = "bar",
-            marker = list(color = "#455642")) %>%
-      layout(title = "Most Helpful Resources",
-             xaxis = list(title = "Resource Type"),
-             yaxis = list(title = "Number of Participants"))
+  # Overview - Submissions per Church - improved visualization with less whitespace
+  output$submissions_per_church <- renderPlotly({
+    data <- fetch_blob_data()
+    if (!is.null(data)) {
+      church_counts <- data %>%
+        # Extract the church ID properly using regex
+        mutate(church = str_extract(blobName, "(?<=filled-forms/)[^/]+")) %>%
+        count(church, name = "submissions") %>%
+        arrange(desc(submissions))
+      
+      p <- ggplot(church_counts, aes(x = church, y = submissions, fill = church)) +
+        geom_bar(stat = "identity") +
+        labs(x = NULL, y = NULL) +
+        theme_minimal() +
+        theme(
+          legend.position = "none",
+          plot.margin = margin(0, 0, 0, 0),
+          panel.grid.minor = element_blank(),
+          panel.grid.major.x = element_blank(),
+          axis.text = element_text(size = 9)
+        ) +
+        scale_fill_brewer(palette = "Blues")
+      
+      ggplotly(p) %>% 
+        layout(
+          margin = list(l = 40, r = 20, b = 40, t = 10, pad = 0),
+          autosize = TRUE
+        )
+    }
   })
   
-  # Pastor Analytics Outputs
-  output$priority_cases <- renderDT({
-    data <- forms_data()$form1
-    if (is.null(data)) return(NULL)
-    
-    user <- user_data()
-    church_data <- filter(data, church_id == user$churchId)
-    
-    priority_data <- church_data %>%
-      select(user_id, Age, `General satisfaction (1-5)`, 
-             `Happiness in relationship (0-6)`) %>%
-      arrange(`General satisfaction (1-5)`)
-    
-    datatable(priority_data,
-              options = list(pageLength = 5),
-              rownames = FALSE)
+  # User Engagement - Top Active Users - more compact table
+  output$top_users <- renderTable({
+    data <- fetch_blob_data()
+    if (!is.null(data)) {
+      top_users <- data %>%
+        mutate(user = str_extract(blobName, "[0-9]+")) %>%
+        count(user, name = "submissions") %>%
+        arrange(desc(submissions)) %>%
+        head(5)
+      return(top_users)
+    } else {
+      return(data.frame(user = NA, submissions = NA))
+    }
+  }, striped = TRUE, hover = TRUE, bordered = TRUE, width = "100%")
+  
+  # Submission Trends - Over Time - improved visualization with less whitespace
+  output$submissions_over_time <- renderPlotly({
+    data <- fetch_blob_data()
+    if (!is.null(data)) {
+      time_data <- data %>%
+        mutate(timestamp = str_extract(blobName, "(\\d{14})") %>% ymd_hms()) %>%
+        mutate(date = as.Date(timestamp)) %>%
+        count(date, name = "submissions")
+      
+      p <- ggplot(time_data, aes(x = date, y = submissions)) +
+        geom_line(color = "#1f77b4", size = 1) +
+        geom_point(color = "#ff7f0e", size = 2) +
+        labs(x = NULL, y = NULL) +  # Remove axis labels to save space
+        theme_minimal() +
+        theme(
+          plot.margin = margin(0, 0, 0, 0),
+          panel.grid.minor = element_blank(),
+          axis.text = element_text(size = 9)
+        )
+      
+      ggplotly(p) %>% 
+        layout(
+          margin = list(l = 40, r = 20, b = 40, t = 10, pad = 0),
+          autosize = TRUE
+        )
+    }
   })
   
-  output$church_satisfaction_trend <- renderPlotly({
-    data <- forms_data()$form1
-    if (is.null(data)) return(NULL)
-    
-    user <- user_data()
-    church_data <- filter(data, church_id == user$churchId)
-    
-    plot_ly(church_data, x = ~Age, y = ~`General satisfaction (1-5)`,
-            type = "scatter", mode = "markers+lines",
-            marker = list(color = "#455642")) %>%
-      layout(title = "Church Satisfaction Trend",
-             xaxis = list(title = "Age"),
-             yaxis = list(title = "Satisfaction Level"))
+  # Marital Status Distribution
+  output$marital_status_chart <- renderPlotly({
+    form_data <- fetch_form_data()
+    if (!is.null(form_data) && nrow(form_data) > 0) {
+      # Calculate marital status distribution
+      marital_status_counts <- form_data %>%
+        count(`marital status`, name = "count") %>%
+        arrange(desc(count))
+      
+      # Create pie chart
+      plot_ly(marital_status_counts, labels = ~marital_status, values = ~count, 
+              type = 'pie',
+              textposition = 'inside',
+              textinfo = 'label+percent',
+              insidetextfont = list(color = '#FFFFFF'),
+              hoverinfo = 'text',
+              text = ~paste(marital_status, ": ", count, " forms"),
+              marker = list(colors = colorRampPalette(c("#455642", "#8DAB7F"))(nrow(marital_status_counts)),
+                            line = list(color = '#FFFFFF', width = 1))) %>%
+        layout(
+          showlegend = TRUE,
+          legend = list(orientation = "h", y = -0.1),
+          margin = list(l = 20, r = 20, b = 10, t = 10, pad = 0),
+          autosize = TRUE
+        )
+    }
   })
   
-  # Add more outputs as needed...
+  # CHURCH DATA
+
+  output$church_name <- renderText({
+    church <- church_data()
+    if (is.null(church) || nrow(church) == 0) return("Not available")
+    return(church$churchName)
+  })
+  
+  output$church_address <- renderText({
+    church <- church_data()
+    if (is.null(church) || nrow(church) == 0) return("Not available") 
+    return(church$churchAddress)
+  })
+  
+
 }
+
+
 
 # Run the application
 shinyApp(ui = ui, server = server)
