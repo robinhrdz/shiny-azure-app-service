@@ -11,8 +11,6 @@ library(DT)
 library(shinyjs)
 library(AzureCosmosR)
 
-
-
 # Cosmos DB Connection Details
 cosmos_endpoint <- "https://smlp-cosmos.documents.azure.com:443/"
 cosmos_key <- "cnIOBAncXO4j4aAxs9hdL8tCsyJHpKQcNuFIBnnrFWQGT7L6H0RthRfwijFEO0GSpl39pLE1lQ2pACDbA90tsw=="
@@ -103,17 +101,18 @@ server <- function(input, output, session) {
       user_data(fromJSON(rawToChar(response$content)))
     }
   })
+  
   # Church Data
   church_data <- reactiveVal(NULL)
   
- # fetching church data
+  # fetching church data
   observe({
     user <- user_data()
     
     # Only proceed if we have valid user data with a churchId
     if (!is.null(user) && !is.null(user$churchId)) {
       response <- tryCatch({
-        GET("https://localhost:7006/api/church", 
+        GET("http://smlp-datamanagement-api-cng3d5azd6a8bbg9.centralus-01.azurewebsites.net//api/church", 
             config = list(ssl_verifypeer = FALSE))
       }, error = function(e) {
         return(NULL)
@@ -135,6 +134,64 @@ server <- function(input, output, session) {
       }
     }
   })
+  
+  # Add a reactive value for all users
+  all_users_data <- reactiveVal(NULL)
+  
+  # Fetch all users (similar to how all churches are fetched)
+  observe({
+    # Only proceed if we have valid user data
+    if (!is.null(user_data())) {
+      response <- tryCatch({
+        GET("http://smlp-datamanagement-api-cng3d5azd6a8bbg9.centralus-01.azurewebsites.net//api/user", 
+            config = list(ssl_verifypeer = FALSE))
+      }, error = function(e) {
+        return(NULL)
+      })
+      
+      if (!is.null(response) && status_code(response) == 200) {
+        users <- fromJSON(rawToChar(response$content))
+        all_users_data(users)
+      }
+    }
+  })
+  
+  
+  fetch_marital_status_data <- reactive({
+    tryCatch({
+      # Use the User API endpoint
+      response <- GET("https://smlp-datamanagement-api-cng3d5azd6a8bbg9.centralus-01.azurewebsites.net/api/User",
+                      config = list(ssl_verifypeer = FALSE))
+      
+      if (status_code(response) == 200) {
+        user_data <- fromJSON(rawToChar(response$content))
+        
+        # Check if we have marital status data
+        if (is.null(user_data) || !"maritalStatus" %in% names(user_data)) {
+          warning("User API response does not contain marital status information")
+          return(NULL)
+        }
+        
+        user_data$maritalStatus <- toupper(user_data$maritalStatus)
+        
+        # Filter out NA or empty values and count by marital status
+        marital_counts <- user_data %>%
+          filter(!is.na(maritalStatus) & maritalStatus != "") %>%
+          count(maritalStatus, name = "count") %>%
+          arrange(desc(count))
+        
+        return(marital_counts)
+      } else {
+        warning(paste("User API returned status code:", status_code(response)))
+        return(NULL)
+      }
+    }, error = function(e) {
+      warning(paste("Error fetching user data:", e$message))
+      return(NULL)
+    })
+  })
+  
+  
   # Display user info, this is shown to ALL users
   output$user_display <- renderUI({
     user <- user_data()
@@ -168,14 +225,12 @@ server <- function(input, output, session) {
               div(style = "text-align: center; width: 33%;",
                   p(style = "margin: 0; font-size: 12px; color: #666;", "CHURCH ID"),
                   p(style = "margin: 0; font-weight: bold;", user$churchId)
-              ),
-
+              )
           )
       )
     )
   })
   
-
   # Welcome message based on role
   output$role_welcome_message <- renderUI({
     user <- user_data()
@@ -193,14 +248,42 @@ server <- function(input, output, session) {
     )
     
     div(class = "role-welcome",
-        p(paste0("Welcome, ", user$name, "! You are logged in as a ", role_text, ".")),
-
+        p(paste0("Welcome, ", user$name, "! You are logged in as a ", role_text, "."))
     )
+  })
+  
+  # Function to count user submissions
+  get_user_submissions_count <- reactive({
+    user <- user_data()
+    
+    if (is.null(user)) {
+      return(0)
+    }
+    
+    # Get blob data
+    blob_data <- fetch_blob_data()
+    
+    if (is.null(blob_data) || nrow(blob_data) == 0) {
+      return(0)
+    }
+    
+    # Create a pattern to search for the current user's ID in the blob names
+    user_pattern <- paste0("/", user$userId, "/")
+    
+    # Filter and count submissions from this user
+    user_submissions <- blob_data %>%
+      filter(str_detect(blobName, user_pattern))
+    
+    return(nrow(user_submissions))
   })
   
   # Dashboards
   output$admin_dashboard <- renderUI({
     user <- user_data()
+    
+    if (is.null(user)) {
+      return(NULL)
+    }
     
     if (user$role == "1") {
       #admin Dashboard
@@ -222,9 +305,10 @@ server <- function(input, output, session) {
             div(class = "text-center", uiOutput("unique_users_big"))
           )),
           column(width = 6, box(
-            title = "Top Active Users", width = NULL, height = "150px",
+            title = "Top Active Users", width = NULL, height = "300px",
             solidHeader = TRUE, status = "primary",
-            tableOutput("top_users")
+            div(style = "height: 100px; overflow-y: auto;", 
+                tableOutput("top_users"))
           ))
         ),
         fluidRow(
@@ -249,12 +333,11 @@ server <- function(input, output, session) {
       ))
     } 
     # Pastor Dashboard
-    # In the pastor dashboard section, modify the return statement to include church info:
     else if (user$role == "2") {
       return(
         fluidRow(
           column(width = 6, box(
-            title = "Church Information", width = NULL,
+            title = "Church Information", width = NULL, height = "150px",
             solidHeader = TRUE, status = "primary",
             
             fluidRow(
@@ -275,18 +358,28 @@ server <- function(input, output, session) {
             title = "Top Active Church Members", width = NULL, height = "150px",
             solidHeader = TRUE, status = "primary",
             tableOutput("top_users")
-          ))
+          )),
+          column(width = 6,
+                 box(
+                   title = "Congregation Marital Status", width = NULL, height = "250px",
+                   status = "primary",
+                   solidHeader = TRUE,
+               
+                   plotlyOutput("pastor_marital_status_chart", height = "200px", width = "100%")
+                 )
+          ),
+
+    
         )
       )
     }
-    # User Dashboard
+    # User Dashboard - Added user form count here
     else if (user$role == "3") {
       return(
         fluidRow(
           column(width = 6, box(
-            title = "Church Information", width = NULL, height = "150px",
+            title = "Church Information", width = NULL,
             solidHeader = TRUE, status = "primary",
-            
             fluidRow(
               column(4, strong("Church Name:")),
               column(8, textOutput("church_name"))
@@ -294,18 +387,28 @@ server <- function(input, output, session) {
             fluidRow(
               column(4, strong("Address:")),
               column(8, textOutput("church_address"))
+            )
+          )),
+          column(width = 6, box(
+            title = "Your Form Submissions", width = NULL,
+            solidHeader = TRUE, status = "primary",
+            div(class = "text-center", 
+                div(class = "big-metric", textOutput("user_submissions_count")),
+                div(class = "metric-label", "Forms Submitted")
             ),
           ))
         )
       )
     }
-    
- else {
+    else {
       return(NULL)  # If user role is unknown, return nothing
     }
   })
   
-  
+  # User submissions count output
+  output$user_submissions_count <- renderText({
+    get_user_submissions_count()
+  })
   
   # Value boxes - Admin only
   output$templates_count_box <- renderValueBox({
@@ -338,6 +441,28 @@ server <- function(input, output, session) {
     )
   })
   
+  # Fetch blob data for metrics
+  fetch_blob_data <- reactive({
+    tryCatch({
+      response <- GET("https://smlp-aabqhwdjcbfee2fx.centralus-01.azurewebsites.net/api/ConnectionTest/get-data-from-blob",
+                      config = list(ssl_verifypeer = FALSE))
+      if (status_code(response) == 200) {
+        data <- fromJSON(content(response, "text"))$data
+        if (is.null(data)) {
+          warning("API returned empty data")
+          return(NULL)
+        }
+        return(data)
+      } else {
+        warning(paste("API returned status code:", status_code(response)))
+        return(NULL)
+      }
+    }, error = function(e) {
+      warning(paste("Error in API call:", e$message))
+      return(NULL)
+    })
+  })
+  
   # Fetch form data from blob and parse contents
   fetch_form_data <- reactive({
     tryCatch({
@@ -360,7 +485,6 @@ server <- function(input, output, session) {
       processed_data <- data.frame()
       
       # For each blob, try to fetch the actual form content 
-      # This would be replaced with actual API call to get form content
       for (i in 1:nrow(blob_data)) {
         blob_name <- blob_data$blobName[i]
         
@@ -375,7 +499,6 @@ server <- function(input, output, session) {
         if (status_code(form_response) == 200) {
           form_data <- fromJSON(content(form_response, "text"))
           
-         
           row_data <- data.frame(
             blobName = blob_name,
             church = church_id,
@@ -390,34 +513,9 @@ server <- function(input, output, session) {
         }
       }
       
-      
       return(processed_data)
     }, error = function(e) {
       warning(paste("Error in form data processing:", e$message))
-      
-      
-    })
-  })
-  
-  # Fetch blob data for original metrics
-  fetch_blob_data <- reactive({
-    tryCatch({
-      response <- GET("https://smlp-aabqhwdjcbfee2fx.centralus-01.azurewebsites.net/api/ConnectionTest/get-data-from-blob",
-                      config = list(ssl_verifypeer = FALSE))
-      if (status_code(response) == 200) {
-        data <- fromJSON(content(response, "text"))$data
-        if (is.null(data)) {
-          warning("API returned empty data")
-          return(NULL)
-        }
-        return(data)
-      } else {
-        warning(paste("API returned status code:", status_code(response)))
-        return(NULL)
-      }
-    }, error = function(e) {
-      warning(paste("Error in API call:", e$message))
-      return(NULL)
     })
   })
   
@@ -439,7 +537,21 @@ server <- function(input, output, session) {
   output$unique_users_big <- renderUI({
     data <- fetch_blob_data()
     if (!is.null(data)) {
-      unique_users <- n_distinct(str_extract(data$blobName, "user[0-9]+"))
+      # Split the path and extract components
+      unique_users <- data %>%
+        mutate(path_parts = strsplit(blobName, "/")) %>%
+        mutate(user_id = sapply(path_parts, function(parts) {
+          # If the path has at least 3 parts (filled-forms/church_id/user_id/...)
+          if(length(parts) >= 2) {
+            return(parts[2])  # The third component should be the user ID
+          } else {
+            return(NA)
+          }
+        })) %>%
+        filter(!is.na(user_id)) %>%
+        pull(user_id) %>%
+        n_distinct()
+      
       tagList(
         div(class = "big-metric", unique_users),
         div(class = "metric-label", "Unique Users")
@@ -449,17 +561,41 @@ server <- function(input, output, session) {
     }
   })
   
-  # Overview - Submissions per Church - improved visualization with less whitespace
+  # Submissions per church
   output$submissions_per_church <- renderPlotly({
     data <- fetch_blob_data()
-    if (!is.null(data)) {
+    church <- church_data()
+    
+    if (!is.null(data) && !is.null(church)) {
+      # First, extract church IDs from blob data
       church_counts <- data %>%
-        # Extract the church ID properly using regex
-        mutate(church = str_extract(blobName, "(?<=filled-forms/)[^/]+")) %>%
-        count(church, name = "submissions") %>%
+        mutate(path_parts = strsplit(blobName, "/")) %>%
+        # Extract the church ID from the path
+        mutate(church_id = sapply(path_parts, function(parts) {
+          if(length(parts) >= 1) {
+            return(parts[1])  # first component is the church ID
+          } else {
+            return(NA)
+          }
+        })) %>%
+        filter(!is.na(church_id)) %>%
+        count(church_id, name = "submissions") %>%
         arrange(desc(submissions))
       
-      p <- ggplot(church_counts, aes(x = church, y = submissions, fill = church)) +
+      # Create a mapping dataframe from church ID to church name
+      church_mapping <- church %>%
+        select(id, churchName) %>%
+        rename(church_id = id) %>%
+        mutate(church_id = as.character(church_id))
+      
+      # Merge the counts with the church names
+      church_counts_with_names <- church_counts %>%
+        left_join(church_mapping, by = "church_id") %>%
+        # If no church name is found, use the ID as a fallback
+        mutate(display_name = ifelse(is.na(churchName), church_id, churchName))
+      
+      # Create the plot with church names instead of IDs
+      p <- ggplot(church_counts_with_names, aes(x = display_name, y = submissions, fill = display_name)) +
         geom_bar(stat = "identity") +
         labs(x = NULL, y = NULL) +
         theme_minimal() +
@@ -468,32 +604,88 @@ server <- function(input, output, session) {
           plot.margin = margin(0, 0, 0, 0),
           panel.grid.minor = element_blank(),
           panel.grid.major.x = element_blank(),
-          axis.text = element_text(size = 9)
+          axis.text.x = element_text(size = 9, angle = 45, hjust = 1)  # Angled text for better readability
         ) +
         scale_fill_brewer(palette = "Blues")
       
       ggplotly(p) %>% 
         layout(
-          margin = list(l = 40, r = 20, b = 40, t = 10, pad = 0),
+          margin = list(l = 40, r = 20, b = 60, t = 10, pad = 0),  # Increased bottom margin for angled labels
           autosize = TRUE
         )
     }
   })
-  
   # User Engagement - Top Active Users - more compact table
   output$top_users <- renderTable({
     data <- fetch_blob_data()
+    users <- all_users_data()
+    
     if (!is.null(data)) {
+      # Extract user IDs from blob paths
       top_users <- data %>%
-        mutate(user = str_extract(blobName, "[0-9]+")) %>%
-        count(user, name = "submissions") %>%
+        mutate(path_parts = strsplit(blobName, "/")) %>%
+        mutate(user_id = sapply(path_parts, function(parts) {
+          if(length(parts) >= 2) {
+            return(parts[2])
+          } else {
+            return(NA)
+          }
+        })) %>%
+        filter(!is.na(user_id)) %>%
+        count(user_id, name = "submissions") %>%
         arrange(desc(submissions)) %>%
         head(5)
-      return(top_users)
+      
+      # If we have user data available
+      if (!is.null(users) && nrow(users) > 0) {
+        # Look for possible name columns
+        possible_name_cols <- c("name", "userName", "fullName", "displayName", "firstName", "user_name")
+        name_col <- NULL
+        
+        for (col in possible_name_cols) {
+          if (col %in% names(users)) {
+            name_col <- col
+            break
+          }
+        }
+        
+        # Extract numeric user IDs from path format
+        top_users <- top_users %>%
+          mutate(numeric_id = as.integer(str_extract(user_id, "\\d+")))
+        
+        # Now create user mapping with the correct name column
+        if (!is.null(name_col)) {
+          # Use the found name column
+          user_mapping <- users %>%
+            select(id, !!sym(name_col)) %>%
+            rename(numeric_id = id, name = !!sym(name_col))
+          
+          # Join with user data
+          result <- top_users %>%
+            left_join(user_mapping, by = "numeric_id") %>%
+            mutate(
+              display_name = ifelse(is.na(name), user_id, name)
+            ) %>%
+            select(display_name, submissions) %>%
+            rename(User = display_name, Submissions = submissions)
+          
+          return(result)
+        } else {
+          # If no appropriate name column found, just use IDs
+          message("No user name column found in API response")
+          return(top_users %>% 
+                   rename(User = user_id, Submissions = submissions))
+        }
+      } else {
+        # If no user data, just return IDs
+        return(top_users %>% 
+                 rename(User = user_id, Submissions = submissions))
+      }
     } else {
-      return(data.frame(user = NA, submissions = NA))
+      return(data.frame(User = "No data available", Submissions = NA))
     }
   }, striped = TRUE, hover = TRUE, bordered = TRUE, width = "100%")
+  
   
   # Submission Trends - Over Time - improved visualization with less whitespace
   output$submissions_over_time <- renderPlotly({
@@ -523,36 +715,82 @@ server <- function(input, output, session) {
     }
   })
   
-  # Marital Status Distribution
   output$marital_status_chart <- renderPlotly({
-    form_data <- fetch_form_data()
-    if (!is.null(form_data) && nrow(form_data) > 0) {
-      # Calculate marital status distribution
-      marital_status_counts <- form_data %>%
-        count(`marital status`, name = "count") %>%
-        arrange(desc(count))
+    # Get marital status data
+    status_counts <- fetch_marital_status_data()
+    
+    if (!is.null(status_counts) && nrow(status_counts) > 0) {
+      # Create color palette - add more colors if needed
+      status_colors <- c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b")
       
-      # Create pie chart
-      plot_ly(marital_status_counts, labels = ~marital_status, values = ~count, 
+      # Create pie chart with plotly
+      plot_ly(status_counts, labels = ~maritalStatus, values = ~count, 
               type = 'pie',
               textposition = 'inside',
               textinfo = 'label+percent',
               insidetextfont = list(color = '#FFFFFF'),
-              hoverinfo = 'text',
-              text = ~paste(marital_status, ": ", count, " forms"),
-              marker = list(colors = colorRampPalette(c("#455642", "#8DAB7F"))(nrow(marital_status_counts)),
-                            line = list(color = '#FFFFFF', width = 1))) %>%
+              marker = list(colors = status_colors,
+                            line = list(color = '#FFFFFF', width = 1)),
+              showlegend = FALSE) %>%
         layout(
-          showlegend = TRUE,
-          legend = list(orientation = "h", y = -0.1),
-          margin = list(l = 20, r = 20, b = 10, t = 10, pad = 0),
+          margin = list(l = 20, r = 20, b = 20, t = 20, pad = 0),
           autosize = TRUE
+        )
+    } else {
+      # Return empty plot if no data
+      plot_ly() %>%
+        layout(
+          title = "No marital status data available",
+          annotations = list(
+            x = 0.5,
+            y = 0.5,
+            text = "No data available",
+            showarrow = FALSE,
+            font = list(size = 10)
+          )
         )
     }
   })
   
+  
+  output$pastor_marital_status_chart <- renderPlotly({
+    # Get marital status data (reusing the same data reactive)
+    status_counts <- fetch_marital_status_data()
+    
+    if (!is.null(status_counts) && nrow(status_counts) > 0) {
+      # Create color palette - add more colors if needed
+      status_colors <- c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b")
+      
+      # Create pie chart with plotly for pastor view
+      plot_ly(status_counts, labels = ~maritalStatus, values = ~count, 
+              type = 'pie',
+              textposition = 'inside',
+              textinfo = 'label+percent',
+              insidetextfont = list(color = '#FFFFFF'),
+              marker = list(colors = status_colors,
+                            line = list(color = '#FFFFFF', width = 1)),
+              showlegend = FALSE) %>%
+        layout(
+          title = "Congregation Marital Status",
+          margin = list(l = 20, r = 20, b = 20, t = 20, pad = 0),
+          autosize = TRUE
+        )
+    } else {
+      # Return empty plot if no data
+      plot_ly() %>%
+        layout(
+          title = "No marital status data available",
+          annotations = list(
+            x = 0.5,
+            y = 0.5,
+            text = "No data available",
+            showarrow = FALSE,
+            font = list(size = 10)
+          )
+        )
+    }
+  })
   # CHURCH DATA
-
   output$church_name <- renderText({
     church <- church_data()
     if (is.null(church) || nrow(church) == 0) return("Not available")
@@ -564,11 +802,8 @@ server <- function(input, output, session) {
     if (is.null(church) || nrow(church) == 0) return("Not available") 
     return(church$churchAddress)
   })
-  
 
 }
-
-
 
 # Run the application
 shinyApp(ui = ui, server = server)
