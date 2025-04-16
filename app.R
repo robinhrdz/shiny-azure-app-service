@@ -91,7 +91,7 @@ server <- function(input, output, session) {
   
   observe({
     response <- tryCatch({
-      GET("https://smlp-aabqhwdjcbfee2fx.centralus-01.azurewebsites.net/api/User/get-user", 
+      GET("https://smlp-aabqhwdjcbfee2fx.centralus-01.azurewebsites.net/api/User/all-users", 
           config = list(ssl_verifypeer = FALSE))
     }, error = function(e) {
       return(NULL)
@@ -364,12 +364,12 @@ server <- function(input, output, session) {
                    title = "Congregation Marital Status", width = NULL, height = "250px",
                    status = "primary",
                    solidHeader = TRUE,
-               
+                   
                    plotlyOutput("pastor_marital_status_chart", height = "200px", width = "100%")
                  )
           ),
-
-    
+          
+          
         )
       )
     }
@@ -802,7 +802,7 @@ server <- function(input, output, session) {
     if (is.null(church) || nrow(church) == 0) return("Not available") 
     return(church$churchAddress)
   })
-
+  
 }
 
 # Run the application
