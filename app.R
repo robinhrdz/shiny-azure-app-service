@@ -50,6 +50,10 @@ ui <- dashboardPage(
 
 # Define Server
 server <- function(input, output, session) {
+  
+  # Suppress warnings globally
+  options(warn = -1)
+  
   # Cosmos
   template_count <- reactiveVal(0)
   templates_in_use <- reactiveVal(0)
@@ -194,57 +198,62 @@ server <- function(input, output, session) {
   
   # Display user info, this is shown to ALL users
  # Add a reactive value to track loading state
-output$user_display <- renderUI({
-  # Add a friendly loading indicator with tryCatch to handle errors
-  tryCatch({
-    user <- user_data()
-    
-    # If user data is still loading (NULL at startup) or any error condition
-    if (is.null(user) || length(user$userId) > 1 || length(user$role) > 1) {
-      return(div(class = "alert alert-info", style = "padding: 20px; text-align: center;",
-                 div(icon("spinner", class = "fa-spin fa-2x"), style = "margin-bottom: 15px;"),
-                 h4(style = "margin: 10px 0;", "Setting up your dashboard..."),
-                 p("This may take a moment. Thank you for your patience!")
-      ))
-    }
-    
-    # Normal display for a single user
-    role_text <- switch(
-      as.character(user$role),
-      "1" = "Administrator",
-      "2" = "Pastor",
-      "3" = "User",
-      "Unknown"
-    )
-    
-    # Enhanced user display with more details
-    div(
-      div(style = "text-align: center;",
-          h3(style = "margin: 5px 0; color: #455642;", icon("user-circle"), user$name),
-          div(style = "display: inline-block; background-color: #455642; color: white; padding: 3px 10px; border-radius: 12px; font-size: 12px;", 
-              role_text),
-          hr(style = "margin: 10px 0;"),
-          div(style = "display: flex; justify-content: space-between; margin-top: 10px;",
-              div(style = "text-align: center; width: 33%;",
-                  p(style = "margin: 0; font-size: 12px; color: #666;", "USER ID"),
-                  p(style = "margin: 0; font-weight: bold;", user$userId)
-              ),
-              div(style = "text-align: center; width: 33%;",
-                  p(style = "margin: 0; font-size: 12px; color: #666;", "CHURCH ID"),
-                  p(style = "margin: 0; font-weight: bold;", user$churchId)
-              )
-          )
+  output$user_display <- renderUI({
+    # Add a friendly loading indicator with tryCatch to handle errors
+    tryCatch({
+      user <- user_data()
+      
+      # Check if user data is NULL or has multiple entries (indicating it's not ready yet)
+      if (is.null(user) || is.data.frame(user) && nrow(user) > 1) {
+        return(div(class = "alert", style = "padding: 20px; text-align: center; background-color: #455642; color: white; border-color: #455642;",
+                   div(icon("spinner", class = "fa-spin fa-2x"), style = "margin-bottom: 15px;"),
+                   h4(style = "margin: 10px 0; color: white;", "Loading your dashboard..."),
+                   p("This may take a moment. Thank you for your patience!")
+        ))
+      }
+      
+      # Make sure we're dealing with a single user (first row if multiple)
+      if (is.data.frame(user) && nrow(user) > 0) {
+        user <- user[1,]
+      }
+      
+      # Get role text safely
+      role_text <- switch(
+        as.character(user$role),
+        "1" = "Administrator",
+        "2" = "Pastor",
+        "3" = "User",
+        "Unknown"
       )
-    )
-  }, error = function(e) {
-    # Handle any errors with a friendly loading message
-    return(div(class = "alert alert-info", style = "padding: 20px; text-align: center;",
-               div(icon("spinner", class = "fa-spin fa-2x"), style = "margin-bottom: 15px;"),
-               h4(style = "margin: 10px 0;", "Preparing your dashboard..."),
-               p("We're working on loading your information. Please wait a moment.")
-    ))
+      
+      # Enhanced user display with more details
+      div(
+        div(style = "text-align: center;",
+            h3(style = "margin: 5px 0; color: #455642;", icon("user-circle"), user$name),
+            div(style = "display: inline-block; background-color: #455642; color: white; padding: 3px 10px; border-radius: 12px; font-size: 12px;", 
+                role_text),
+            hr(style = "margin: 10px 0;"),
+            div(style = "display: flex; justify-content: space-between; margin-top: 10px;",
+                div(style = "text-align: center; width: 33%;",
+                    p(style = "margin: 0; font-size: 12px; color: #666;", "USER ID"),
+                    p(style = "margin: 0; font-weight: bold;", user$userId)
+                ),
+                div(style = "text-align: center; width: 33%;",
+                    p(style = "margin: 0; font-size: 12px; color: #666;", "CHURCH ID"),
+                    p(style = "margin: 0; font-weight: bold;", user$churchId)
+                )
+            )
+        )
+      )
+    }, error = function(e) {
+      # Handle any errors with a friendly loading message
+      return(div(class = "alert alert-info", style = "padding: 20px; text-align: center; background-color: #455642; color: white; border-color: #455642;",
+                 div(icon("spinner", class = "fa-spin fa-2x"), style = "margin-bottom: 15px;"),
+                 h4(style = "margin: 10px 0;", "Loading your dashboard..."),
+                 p("We're working on loading your information. Please wait a moment.")
+      ))
+    })
   })
-})
   
   # Welcome message based on role
   output$role_welcome_message <- renderUI({
