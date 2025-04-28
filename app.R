@@ -193,15 +193,22 @@ server <- function(input, output, session) {
   
   
   # Display user info, this is shown to ALL users
-  output$user_display <- renderUI({
+ # Add a reactive value to track loading state
+output$user_display <- renderUI({
+  # Add a friendly loading indicator with tryCatch to handle errors
+  tryCatch({
     user <- user_data()
     
-    if (is.null(user)) {
-      return(div(class = "alert alert-warning", style = "padding: 10px;",
-                 icon("exclamation-triangle"), 
-                 "No user logged in"))
+    # If user data is still loading (NULL at startup) or any error condition
+    if (is.null(user) || length(user$userId) > 1 || length(user$role) > 1) {
+      return(div(class = "alert alert-info", style = "padding: 20px; text-align: center;",
+                 div(icon("spinner", class = "fa-spin fa-2x"), style = "margin-bottom: 15px;"),
+                 h4(style = "margin: 10px 0;", "Setting up your dashboard..."),
+                 p("This may take a moment. Thank you for your patience!")
+      ))
     }
     
+    # Normal display for a single user
     role_text <- switch(
       as.character(user$role),
       "1" = "Administrator",
@@ -229,7 +236,15 @@ server <- function(input, output, session) {
           )
       )
     )
+  }, error = function(e) {
+    # Handle any errors with a friendly loading message
+    return(div(class = "alert alert-info", style = "padding: 20px; text-align: center;",
+               div(icon("spinner", class = "fa-spin fa-2x"), style = "margin-bottom: 15px;"),
+               h4(style = "margin: 10px 0;", "Preparing your dashboard..."),
+               p("We're working on loading your information. Please wait a moment.")
+    ))
   })
+})
   
   # Welcome message based on role
   output$role_welcome_message <- renderUI({
@@ -295,40 +310,38 @@ server <- function(input, output, session) {
         ),
         fluidRow(
           column(width = 3, box(
-            title = "Total Submissions", width = NULL, height = "150px",
+            title = "Total Submissions", width = NULL, height = "200px",
             solidHeader = TRUE, status = "primary",
             div(class = "text-center", uiOutput("total_submissions_big"))
           )),
           column(width = 3, box(
-            title = "Unique Users", width = NULL, height = "150px",
+            title = "Unique Users", width = NULL, height = "200px",
             solidHeader = TRUE, status = "primary",
             div(class = "text-center", uiOutput("unique_users_big"))
           )),
           column(width = 6, box(
-            title = "Top Active Users", width = NULL, height = "300px",
+            title = "Top Active Users", width = NULL, height = "200px",
             solidHeader = TRUE, status = "primary",
             div(style = "height: 100px; overflow-y: auto;", 
                 tableOutput("top_users"))
           ))
         ),
         fluidRow(
-          column(width = 6, div(style = "height: 380px;",
+          column(width = 4, div(style = "height: 300px;",
                                 box(title = "Submissions per Church", width = NULL, height = "100%",
                                     solidHeader = TRUE, status = "primary",
-                                    plotlyOutput("submissions_per_church", height = "300px"))
+                                    plotlyOutput("submissions_per_church", height = "250px"))
           )),
-          column(width = 6, div(style = "height: 300px;",
+          column(width = 4, div(style = "height: 300px;",
                                 box(title = "Submissions Over Time", width = NULL, height = "100%",
                                     solidHeader = TRUE, status = "primary",
-                                    plotlyOutput("submissions_over_time", height = "300px"))
+                                    plotlyOutput("submissions_over_time", height = "250px"))
+          )),
+          column(width = 4, div(style = "height: 300px;",
+                                box(title = "Marital Status Distribution", width = NULL, height = "100%",
+                                    solidHeader = TRUE, status = "primary",
+                                    plotlyOutput("marital_status_chart", height = "250px"))
           ))
-        ),
-        fluidRow(
-          column(width = 6, box(
-            title = "Marital Status Distribution", width = NULL, height = "250px",
-            solidHeader = TRUE, status = "primary",
-            plotlyOutput("marital_status_chart", height = "190px"))
-          )
         )
       ))
     } 
@@ -564,55 +577,90 @@ server <- function(input, output, session) {
   # Submissions per church
   output$submissions_per_church <- renderPlotly({
     data <- fetch_blob_data()
-    church <- church_data()
     
-    if (!is.null(data) && !is.null(church)) {
-      # First, extract church IDs from blob data
-      church_counts <- data %>%
-        mutate(path_parts = strsplit(blobName, "/")) %>%
-        # Extract the church ID from the path
-        mutate(church_id = sapply(path_parts, function(parts) {
-          if(length(parts) >= 1) {
-            return(parts[1])  # first component is the church ID
-          } else {
-            return(NA)
-          }
-        })) %>%
-        filter(!is.na(church_id)) %>%
-        count(church_id, name = "submissions") %>%
-        arrange(desc(submissions))
+    # Get ALL churches instead of just the user's church
+    response <- tryCatch({
+      GET("http://smlp-datamanagement-api-cng3d5azd6a8bbg9.centralus-01.azurewebsites.net//api/church", 
+          config = list(ssl_verifypeer = FALSE))
+    }, error = function(e) {
+      return(NULL)
+    })
+    
+    if (!is.null(response) && status_code(response) == 200) {
+      all_churches <- fromJSON(rawToChar(response$content))
       
-      # Create a mapping dataframe from church ID to church name
-      church_mapping <- church %>%
-        select(id, churchName) %>%
-        rename(church_id = id) %>%
-        mutate(church_id = as.character(church_id))
+      # Debug print to see the structure
+      print("All churches data:")
+      print(head(all_churches))
       
-      # Merge the counts with the church names
-      church_counts_with_names <- church_counts %>%
-        left_join(church_mapping, by = "church_id") %>%
-        # If no church name is found, use the ID as a fallback
-        mutate(display_name = ifelse(is.na(churchName), church_id, churchName))
-      
-      # Create the plot with church names instead of IDs
-      p <- ggplot(church_counts_with_names, aes(x = display_name, y = submissions, fill = display_name)) +
-        geom_bar(stat = "identity") +
-        labs(x = NULL, y = NULL) +
-        theme_minimal() +
-        theme(
-          legend.position = "none",
-          plot.margin = margin(0, 0, 0, 0),
-          panel.grid.minor = element_blank(),
-          panel.grid.major.x = element_blank(),
-          axis.text.x = element_text(size = 9, angle = 45, hjust = 1)  # Angled text for better readability
-        ) +
-        scale_fill_brewer(palette = "Blues")
-      
-      ggplotly(p) %>% 
-        layout(
-          margin = list(l = 40, r = 20, b = 60, t = 10, pad = 0),  # Increased bottom margin for angled labels
-          autosize = TRUE
-        )
+      if (!is.null(data)) {
+        # Extract church information from blob paths
+        # Look at first few blob paths to understand structure
+        print("Sample blob paths:")
+        print(head(data$blobName))
+        
+        # Extract church ID from blob path - adjust the regex based on actual path structure
+        church_counts <- data %>%
+          # Extract the church identifier based on your actual blob structure
+          mutate(church_id = sapply(strsplit(blobName, "/"), function(parts) {
+            if(length(parts) >= 1) {
+              # Try to extract just the numeric part if there's "church" prefix
+              potential_id <- parts[1]
+              numeric_id <- str_extract(potential_id, "\\d+")
+              return(ifelse(is.na(numeric_id), potential_id, numeric_id))
+            } else {
+              return(NA)
+            }
+          })) %>%
+          filter(!is.na(church_id)) %>%
+          count(church_id, name = "submissions") %>%
+          arrange(desc(submissions))
+        
+        # Create mapping of all church IDs to names
+        church_mapping <- all_churches %>%
+          select(id, churchName) %>%
+          rename(church_id = id) %>%
+          mutate(church_id = as.character(church_id))
+        
+        # Debug prints
+        print("Church ID counts:")
+        print(church_counts)
+        print("Church mapping:")
+        print(church_mapping)
+        
+        # Join with mapping
+        church_counts_with_names <- church_counts %>%
+          left_join(church_mapping, by = "church_id") %>%
+          # When a match isn't found, use the original ID
+          mutate(display_name = ifelse(is.na(churchName), church_id, churchName))
+        
+        print("Final data for plot:")
+        print(church_counts_with_names)
+        
+        # Create plot
+        p <- ggplot(church_counts_with_names, aes(x = display_name, y = submissions, fill = display_name)) +
+          geom_bar(stat = "identity") +
+          labs(x = NULL, y = NULL) +
+          theme_minimal() +
+          theme(
+            legend.position = "none",
+            plot.margin = margin(0, 0, 0, 0),
+            panel.grid.minor = element_blank(),
+            panel.grid.major.x = element_blank(),
+            axis.text.x = element_text(size = 9, angle = 45, hjust = 1)
+          ) +
+          scale_fill_brewer(palette = "Blues")
+        
+        ggplotly(p) %>% 
+          layout(
+            margin = list(l = 40, r = 20, b = 60, t = 10, pad = 0),
+            autosize = TRUE
+          )
+      } else {
+        plot_ly() %>% layout(title = "No blob data available")
+      }
+    } else {
+      plot_ly() %>% layout(title = "Could not fetch church data")
     }
   })
   # User Engagement - Top Active Users - more compact table
